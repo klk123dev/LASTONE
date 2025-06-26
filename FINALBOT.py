@@ -107,7 +107,7 @@ def check_availability(chat_id: int):
                 buy_button = soup.find('a', {'class': 'buy-ticket'})
                 sold_out = any(
                     "sold out" in element.text.lower() or 
-                    "agotado" in element.text.lower()
+                    "agotadas" in element.text.lower()
                     for element in soup.find_all(class_=["event-status", "tickets-status"])
                 )
                 
