@@ -2,6 +2,7 @@ import requests
 import asyncio
 import logging
 import time
+import socket
 from telegram import Bot, Update
 from telegram.ext import (
     Application,
@@ -11,12 +12,20 @@ from telegram.ext import (
     filters
 )
 from bs4 import BeautifulSoup
-from flask import Flask
 import threading
 from datetime import datetime
 
+# ----- CONFIGURACIÓN ANTICONFLICTOS -----
+try:
+    lock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    lock.bind('\0ra_monitor_lock')
+    print("🔒 Bloqueo de instancia única activado")
+except socket.error:
+    print("🛑 ¡Ya hay una instancia en ejecución! Saliendo...")
+    exit(1)
+
 # Configuración
-TOKEN = "7999602264:AAFQeUYuJM8iL4lnsak1Mn6Wo7qGEMENeFg"  # 👈 ¡Reemplaza con tu token real!
+TOKEN = "8091750123:AAFa76yyeJK_STepks8JzK9NMjWx9KKdqEw"  # 👈 ¡REEMPLAZA ESTO!
 monitored_events = {}
 
 # Logging
@@ -26,16 +35,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Flask para Render
-app = Flask(__name__)
-
-@app.route('/')
-def home():
-    return "🤖 Bot activo - Monitoreando Resident Advisor"
-
-def run_flask():
-    app.run(host='0.0.0.0', port=10000)
-
 # ---- FUNCIONES DEL BOT ----
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -43,7 +42,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Envía la URL de un evento SOLD OUT para monitorearlo.\n"
         "Comandos disponibles:\n"
         "/status - Ver eventos monitoreados\n"
-        "/stop [url] - Detener monitoreo"
+        "/stop [url] - Detener monitoreo\n\n"
+        "🔍 Actualmente optimizado para:\nhttps://es.ra.co/events/2072940"
     )
 
 async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -57,12 +57,11 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat_id not in monitored_events:
         monitored_events[chat_id] = {}
     
-    monitored_events[chat_id][url] = {'last_checked': None}
-    await update.message.reply_text(f"🔍 Monitoreando nuevo evento:\n{url}")
-    
-    # Si es el primer evento para este usuario, inicia el monitoreo
-    if len(monitored_events[chat_id]) == 1:
-        threading.Thread(target=check_availability, args=(chat_id,), daemon=True).start()
+    if url not in monitored_events[chat_id]:
+        monitored_events[chat_id][url] = {'last_checked': None}
+        await update.message.reply_text(f"🔍 Monitoreando evento:\n{url}")
+    else:
+        await update.message.reply_text(f"ℹ️ Este evento ya está siendo monitoreado")
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
@@ -92,49 +91,55 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("ℹ️ URL no encontrada en monitoreo")
 
 async def send_notification(chat_id: int, url: str):
-    """Envía notificaciones de forma confiable"""
     bot = Bot(token=TOKEN)
     await bot.send_message(
         chat_id=chat_id,
         text=f"🚨 ¡ENTRADAS DISPONIBLES! 🎟️\n{url}",
-        disable_notification=False  # Asegura notificación con sonido
+        disable_notification=False
     )
 
-def check_availability(chat_id: int):
-    """Monitoreo mejorado con detección precisa"""
+def check_availability():
     bot = Bot(token=TOKEN)
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Accept-Language": "en-US,en;q=0.9"
     }
     
-    while chat_id in monitored_events and monitored_events[chat_id]:
+    while True:
         try:
-            for url in list(monitored_events[chat_id].keys()):
-                try:
-                    response = requests.get(url, headers=headers, timeout=15)
-                    soup = BeautifulSoup(response.text, 'html.parser')
-                    
-                    # Detección MEJORADA (julio 2025)
-                    buy_button = soup.find('a', class_='buy-ticket')
-                    sold_out = any(
-                        text in element.text.lower()
-                        for element in soup.find_all(class_=["event-status", "tickets-status"])
-                        for text in ["sold out", "agotadas", "no tickets", "ended", "ha terminado"]
-                    )
-                    
-                    monitored_events[chat_id][url]['last_checked'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    
-                    if buy_button and not sold_out:
-                        asyncio.run(send_notification(chat_id, url))
-                        del monitored_events[chat_id][url]
-                        logger.info(f"✅ Entradas disponibles detectadas para {url}")
+            for chat_id in list(monitored_events.keys()):
+                for url in list(monitored_events[chat_id].keys()):
+                    try:
+                        response = requests.get(url, headers=headers, timeout=15)
+                        soup = BeautifulSoup(response.text, 'html.parser')
                         
-                except Exception as e:
-                    logger.error(f"Error al verificar {url}: {str(e)}")
-                    time.sleep(10)
+                        # ---- DETECCIÓN ESPECÍFICA PARA ES.RA.CO ----
+                        sold_out = False
+                        
+                        # 1. Buscar elemento de estado
+                        status_element = soup.find(class_="event-status")
+                        if status_element:
+                            status_text = status_element.text.strip().lower()
+                            if "agotado" in status_text or "sold out" in status_text:
+                                sold_out = True
+                        
+                        # 2. Buscar botón de compra
+                        buy_button = soup.find('a', class_='event-tickets__btn')
+                        
+                        # 3. Actualizar registro
+                        monitored_events[chat_id][url]['last_checked'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        
+                        # 4. Notificar SI hay botón Y NO está agotado
+                        if buy_button and not sold_out:
+                            asyncio.run(send_notification(chat_id, url))
+                            del monitored_events[chat_id][url]
+                            logger.info(f"✅ Entradas detectadas: {url}")
+                            continue
+                            
+                    except Exception as e:
+                        logger.error(f"Error en {url}: {str(e)}")
             
-            time.sleep(5)  # Espera entre verificaciones
+            time.sleep(5)
             
         except Exception as e:
             logger.error(f"Error general: {str(e)}")
@@ -142,21 +147,21 @@ def check_availability(chat_id: int):
 
 # ---- INICIO ----
 def main():
-    # Inicia Flask para Render
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
+    monitor_thread = threading.Thread(target=check_availability, daemon=True)
+    monitor_thread.start()
     
-    # Configura el bot
-    application = Application.builder().token(TOKEN).build()
+    application = Application.builder() \
+        .token(TOKEN) \
+        .concurrent_updates(True) \
+        .build()
     
-    # Handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("stop", stop))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
     
-    logger.info("🤖 Bot iniciado correctamente")
-    application.run_polling()
+    logger.info("🤖 Bot especializado iniciado para es.ra.co/events/2072940")
+    application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
