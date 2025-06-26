@@ -9,31 +9,34 @@ from telegram.ext import (
     ContextTypes,
     filters
 )
-import socket
-
-# ===== BLOQUEO PARA INSTANCIA ÚNICA =====
-try:
-    lock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-    lock.bind('\0ra_monitor_lock')
-except socket.error:
-    print("🚨 ¡Ya hay una instancia en ejecución!")
-    exit(1)
+from flask import Flask  # Nuevo: Para el puerto en Render
+import threading
 
 # Configuración
-TOKEN = "7220704086:AAHIooBbtT-Tei70ZodcsJY35RdE-Vp-oTA"  # 👈 REEMPLAZA ESTO
+TOKEN = "7220704086:AAHIooBbtT-Tei70ZodcsJY35RdE-Vp-oTA"  # 👈 ¡REEMPLAZA ESTO!
 monitored_events = {}
 
-# Logging
+# Configura logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# ===== FUNCIONES DEL BOT =====
+# ---- FLASK PARA RENDER (OBLIGATORIO) ----
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "🤖 Bot activo - Monitoreando Resident Advisor"
+
+def run_flask():
+    app.run(host='0.0.0.0', port=10000)
+
+# ---- FUNCIONES DEL BOT ----
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🎟️ **Monitor de Resident Advisor**\n\n"
+        "🎟️ **Monitor de Eventos RA**\n\n"
         "Envía la URL de un evento SOLD OUT para monitorearlo."
     )
 
@@ -42,15 +45,15 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text.strip()
     
     if not url.startswith(('http://', 'https://')):
-        await update.message.reply_text("⚠️ URL debe comenzar con http:// o https://")
+        await update.message.reply_text("⚠️ ¡URL inválida! Debe comenzar con http:// o https://")
         return
     
     monitored_events[chat_id] = url
     await update.message.reply_text(f"🔍 Monitoreando:\n{url}")
     
-    asyncio.create_task(check_availability(chat_id, url))
+    threading.Thread(target=check_availability, args=(chat_id, url), daemon=True).start()
 
-async def check_availability(chat_id: int, url: str):
+def check_availability(chat_id: int, url: str):
     bot = Bot(token=TOKEN)
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -59,47 +62,38 @@ async def check_availability(chat_id: int, url: str):
     
     while chat_id in monitored_events:
         try:
-            response = await asyncio.to_thread(
-                requests.get, 
-                url, 
-                headers=headers, 
-                timeout=10
-            )
-            
+            response = requests.get(url, headers=headers, timeout=10)
             if not any(
                 kw in response.text.lower() 
-                for kw in ["sold out", "agotado", "no tickets"]
+                for kw in ["sold out", "agotado", "tickets for this event are sold out"]
             ):
-                await bot.send_message(
-                    chat_id=chat_id,
-                    text=f"🚨 ¡ENTRADAS DISPONIBLES! 🎟️\n{url}"
+                asyncio.run(
+                    bot.send_message(
+                        chat_id=chat_id,
+                        text=f"🚨 ¡ENTRADAS DISPONIBLES! 🎟️\n{url}"
+                    )
                 )
                 del monitored_events[chat_id]
                 break
-                
-            await asyncio.sleep(5)
-            
+            time.sleep(5)
         except Exception as e:
             logger.error(f"Error: {str(e)}")
-            await asyncio.sleep(30)
+            time.sleep(30)
 
-# ===== CONFIGURACIÓN ANTICONFLICTOS =====
+# ---- INICIO ----
 def main():
-    application = Application.builder() \
-        .token(TOKEN) \
-        .concurrent_updates(True) \
-        .build()
+    # Inicia Flask en segundo plano (para Render)
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
     
-    # Handlers
+    # Configura el bot de Telegram
+    application = Application.builder().token(TOKEN).build()
+    
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
     
-    # Configuración especial
-    application.run_polling(
-        drop_pending_updates=True,
-        allowed_updates=Update.ALL_TYPES,
-        close_loop=False
-    )
+    logger.info("🤖 Bot iniciado correctamente")
+    application.run_polling()
 
 if __name__ == "__main__":
     main()
