@@ -122,7 +122,7 @@ def check_availability(chat_id: int):
                     )
                     del monitored_events[chat_id][url]
             
-            time.sleep(5)  # Espera 5 segundos entre checks
+            time.sleep(3)  # Espera 3 segundos entre checks
             
         except Exception as e:
             logger.error(f"Error: {str(e)}")
